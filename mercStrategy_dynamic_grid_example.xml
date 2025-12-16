@@ -1,0 +1,108 @@
+<Strategies>
+    <!-- Example Dynamic Grid Strategy Configuration -->
+    <Strategy name="DynGrid_TTL" type="EZDG" 
+        accountID="90180012" 
+        Prod="T-TL" 
+        ShmNmPrefix="env173_" 
+        TradeSize="1" 
+        EnableTrade="1" 
+        IsBacktest="0" 
+        
+        <!-- Dynamic Grid Parameters -->
+        GridExitInterval="0.5"           <!-- Exit interval for profit taking -->
+        MinEntryInterval="0.1"           <!-- Minimum spacing between grid levels -->
+        MinDynamicFactor="1.0"           <!-- Minimum dynamic adjustment factor -->
+        MaxDynamicFactor="3.0"           <!-- Maximum dynamic adjustment factor -->
+        WidenThreshold="0.3"             <!-- Profitable rate below which grid widens -->
+        NarrowThreshold="0.7"            <!-- Profitable rate above which grid narrows -->
+        WidenStep="1.2"                  <!-- Multiplication factor for adjustment -->
+        MinOpsForAdjust="10"             <!-- Minimum operations before adjusting -->
+        ReduceRatio="0.6"                <!-- Ratio of position to reduce in risk mode -->
+        MaxLeverage="20.0"               <!-- Maximum leverage allowed -->
+        MaxGridLevels="500"              <!-- Maximum number of grid levels -->
+        
+        <!-- Initial Boundaries (will be updated dynamically) -->
+        InitArbitrageLower="200.0"       <!-- Initial lower arbitrage boundary -->
+        InitArbitrageUpper="210.0"       <!-- Initial upper arbitrage boundary -->
+        InitRiskLower="195.0"            <!-- Initial lower risk boundary -->
+        InitRiskUpper="215.0"            <!-- Initial upper risk boundary -->
+        
+        <!-- Boundary Calculation Windows -->
+        ArbitrageN="120"                 <!-- Days to lookback for arbitrage boundaries -->
+        RiskN="180"                      <!-- Days to lookback for risk boundaries -->
+        UpdateIntervalMinutes="15"       <!-- Interval in minutes to recalculate boundaries -->
+        
+        <!-- Standard Parameters -->
+        SlipTics="1" 
+        MaxTradeSize="10000" 
+        FrontTradeSize="100" 
+        MinAvailable="100000" 
+        MinOI="2" 
+        AnnualRollMonth="0" 
+        FuzzySort="1" 
+        EdgeInPct="0.0005" 
+        EdgeInStd="0" 
+        AdjPosStep="5" 
+        MinGroups="1" 
+        MaxGroups="1" 
+        MaxSteps="0" 
+        MinSteps="3" 
+        MACount="2" 
+        PeriodSecond="900" 
+        TryOrderWaitTime="100" 
+        ForceOrderWaitTime="100" 
+        DayTrade="09:29:30" 
+        OnlyClose="15:14:30" 
+        DaySettle="15:14:55" 
+        NtEnd="23:00:01" 
+        DayEnd="15:15:01" 
+        CancelRate="0.7" 
+        UseCorr="1" 
+        ExpStd="1" 
+        UseRskMdl="1" 
+        UseRskMdlOnly="1" 
+        UseBkZone="1" 
+        UseFrtLogic="1" 
+        TrdVlm1="0" 
+        MinEDC="3" 
+        LtdD="5" 
+        LogTrdFlw="0" 
+        MrgnRt="0.1" 
+        UseWhlStep="0" 
+        UseAcp="1" 
+        FlexAcp="1" 
+        PosDecay="1.0" 
+        RskDecay="1.0" 
+        AcpDecayRate="0.0" 
+        RskRate="0.0" 
+        StdMaMulti="1.0" 
+        UseDecayEMA="0" 
+        UseBlkAcp="1" 
+        EmaCls="0" 
+        FrzMid="1" 
+        TryOrderPriceAdj="2">
+        
+        <TradeSessions>
+            <Session start="09:30:05" end="11:29:50"/>
+            <Session start="13:00:05" end="15:14:50"/>
+        </TradeSessions>
+        
+        <ManSprds>
+            <!-- Example spread configuration -->
+            <Sprd name="3T2509-TL2509" 
+                exeName="3T2509-TL2509" 
+                TrdTp="0" 
+                TrdRt="0" 
+                RefMid="206.7"          <!-- Reference mid price for the spread -->
+                SprdMaxLot="10"         <!-- Maximum lots for this spread -->
+                SprdStpLot="1"          <!-- Step size (lot size per grid level) -->
+                EdgeInPrLong="0.05" 
+                EdgeInPrShrt="0.05" 
+                MdstInPrLong="0.15" 
+                MdstInPrShrt="0.15" 
+                ClsEdgeInPrLong="0.8" 
+                ClsEdgeInPrShrt="0.8" 
+                ArbCfgDttm="20250513-09:40:00" />
+        </ManSprds>
+    </Strategy>
+</Strategies>

@@ -733,6 +733,33 @@ private:
         const char *calcTimeString(int ts,bool useMillisec=true) { char buffer[16]; return getTimeString(buffer,ts,useMillisec); }
         const char *timeString(bool useMillisec=true) { return calcTimeString(timeStamp(),useMillisec); }
     };
+    // Structure to track individual open positions in the grid
+    struct COpenPosition
+    {
+        double entryPrice;    // Grid level price where position was opened
+        int direction;        // 1 for long, -1 for short
+        double entrySpread;   // Actual spread value when position was opened
+        std::vector<double> legPricesAtEntry;  // Prices of each leg when position opened
+        
+        COpenPosition(double ep, int dir, double es) 
+            : entryPrice(ep), direction(dir), entrySpread(es) {}
+        
+        COpenPosition(double ep, int dir, double es, const std::vector<double>& legPrices) 
+            : entryPrice(ep), direction(dir), entrySpread(es), legPricesAtEntry(legPrices) {}
+    };
+    
+    // Structure to track daily high/low for boundary calculation
+    struct CDailyHighLow
+    {
+        int tradingDay;
+        double dailyHigh;
+        double dailyLow;
+        
+        CDailyHighLow() : tradingDay(0), dailyHigh(-DBL_MAX), dailyLow(DBL_MAX) {}
+        CDailyHighLow(int day, double high, double low) 
+            : tradingDay(day), dailyHigh(high), dailyLow(low) {}
+    };
+
     class CSpreadSignal
     {
     public:
@@ -751,6 +778,49 @@ private:
         double m_diPnl = 0.0;
         double m_dnPnl = 0.0;
         double m_pnl = 0.0;
+        
+        // Dynamic grid strategy fields
+        std::vector<COpenPosition> m_openPositions;  // Track all open grid positions
+        double m_dynamicFactorLong = 1.0;            // Dynamic adjustment for long grid
+        double m_dynamicFactorShort = 1.0;           // Dynamic adjustment for short grid
+        int m_numOpensLong = 0;                      // Count of long position opens
+        int m_numOpensShort = 0;                     // Count of short position opens
+        int m_numClosesLong = 0;                     // Count of long position closes
+        int m_numClosesShort = 0;                    // Count of short position closes
+        int m_profitableClosesLong = 0;              // Count of profitable long closes
+        int m_profitableClosesShort = 0;             // Count of profitable short closes
+        double m_entryIntervalLong = 0.0;            // Current entry interval for long side
+        double m_entryIntervalShort = 0.0;           // Current entry interval for short side
+        std::vector<double> m_longGrids;             // Long grid levels
+        std::vector<double> m_shortGrids;            // Short grid levels
+        
+        // Risk management fields
+        int m_arbitragePos = 0;                      // Position from normal arbitrage grid
+        int m_riskPos = 0;                           // Position from risk management
+        bool m_inRiskMode = false;                   // Whether in risk management mode
+        int m_breakDirection = 0;                    // 1: upper break, -1: lower break
+        double m_maxSpread = 0.0;                    // Max spread during risk mode
+        double m_minSpread = 0.0;                    // Min spread during risk mode
+        std::string m_reducedLeg = "";               // Which leg was reduced ("base" or "hedge")
+        double m_reducedAmount = 0.0;                // Amount of position reduced
+        int m_reducedDirection = 0;                  // Direction of reduction
+        double m_maxVirtualAbs = 0.0;                // Max virtual position during risk mode
+        
+        // Risk boundary momentum tracking
+        int m_riskStartIndex = 0;                    // Index when risk mode started (for momentum calc)
+        double m_centerAtRiskStart = 0.0;            // Center value when risk started
+        std::vector<double> m_legPricesAtRiskStart;  // Leg prices when risk started
+        
+        // Daily high/low tracking for N-day boundaries
+        std::deque<CDailyHighLow> m_dailyHighLows;   // Daily highs/lows for boundary calculation
+        int m_maxHistoryDays = 360;                  // Maximum days to keep in history
+        double m_currentDayHigh = -DBL_MAX;          // Current day's high
+        double m_currentDayLow = DBL_MAX;            // Current day's low
+        int m_currentDay = 0;                        // Current trading day
+        
+        // Boundary tracking
+        double m_prevArbitrageLower = 0.0;
+        double m_prevArbitrageUpper = 0.0;
     };
  
     class CSpreadSignalManager
@@ -911,6 +981,43 @@ private:
                         if (paramNm == "di_pnls") pSig->m_diPnl = paramVal;
                         if (paramNm == "dn_pnls") pSig->m_dnPnl = paramVal;
                         if (paramNm == "pnls") pSig->m_pnl = paramVal;
+                        
+                        // Load dynamic grid state
+                        if (paramNm == "dynamic_factor_long") pSig->m_dynamicFactorLong = paramVal;
+                        if (paramNm == "dynamic_factor_short") pSig->m_dynamicFactorShort = paramVal;
+                        if (paramNm == "num_opens_long") pSig->m_numOpensLong = paramVal;
+                        if (paramNm == "num_opens_short") pSig->m_numOpensShort = paramVal;
+                        if (paramNm == "profitable_closes_long") pSig->m_profitableClosesLong = paramVal;
+                        if (paramNm == "profitable_closes_short") pSig->m_profitableClosesShort = paramVal;
+                        
+                        // Load risk management state
+                        if (paramNm == "in_risk_mode") pSig->m_inRiskMode = paramVal;
+                        if (paramNm == "reduced_leg") pSig->m_reducedLeg = paramVal.get<std::string>();
+                        if (paramNm == "reduced_amount") pSig->m_reducedAmount = paramVal;
+                        if (paramNm == "reduced_direction") pSig->m_reducedDirection = paramVal;
+                        if (paramNm == "arbitrage_pos") pSig->m_arbitragePos = paramVal;
+                        if (paramNm == "risk_pos") pSig->m_riskPos = paramVal;
+                        
+                        // Load daily high/low history
+                        if (paramNm == "daily_high_lows" && paramVal.is_array())
+                        {
+                            pSig->m_dailyHighLows.clear();
+                            for (const auto& dayObj : paramVal)
+                            {
+                                if (dayObj.contains("day") && dayObj.contains("high") && dayObj.contains("low"))
+                                {
+                                    CDailyHighLow dayData(
+                                        dayObj["day"].get<int>(),
+                                        dayObj["high"].get<double>(),
+                                        dayObj["low"].get<double>()
+                                    );
+                                    pSig->m_dailyHighLows.push_back(dayData);
+                                }
+                            }
+                        }
+                        if (paramNm == "current_day") pSig->m_currentDay = paramVal;
+                        if (paramNm == "current_day_high") pSig->m_currentDayHigh = paramVal;
+                        if (paramNm == "current_day_low") pSig->m_currentDayLow = paramVal;
                      
                         bool inPersistentArray = std::find(m_persistentArray.begin(), m_persistentArray.end(), pSig) != m_persistentArray.end();
                         if (!inPersistentArray)
@@ -1914,6 +2021,30 @@ private:
         double m_refSell;
         int m_bidQ;
         int m_askQ;
+        
+        // Dynamic grid strategy parameters
+        double m_exitInterval = 0.0;                 // Exit interval for taking profit
+        double m_minEntryInterval = 0.0;             // Minimum entry interval between grid levels
+        double m_minDynamic = 1.0;                   // Minimum dynamic factor
+        double m_maxDynamic = 3.0;                   // Maximum dynamic factor
+        double m_widenThreshold = 0.3;               // Profitable rate threshold to widen grid
+        double m_narrowThreshold = 0.7;              // Profitable rate threshold to narrow grid
+        double m_widenStep = 1.2;                    // Step size for widening/narrowing
+        int m_minOps = 10;                           // Minimum operations before adjusting
+        double m_reduceRatio = 0.6;                  // Ratio of position to reduce in risk mode
+        double m_maxLeverage = 20.0;                 // Maximum leverage allowed
+        int m_maxGridLevels = 500;                   // Maximum number of grid levels
+        
+        // Boundary tracking for dynamic updates
+        double m_arbitrageLower = 0.0;
+        double m_arbitrageUpper = 0.0;
+        double m_riskLower = 0.0;
+        double m_riskUpper = 0.0;
+        
+        // Window sizes for boundary calculation (in days)
+        int m_arbitrageN = 120;                      // Days for arbitrage boundary
+        int m_riskN = 180;                           // Days for risk boundary
+        int m_updateIntervalMinutes = 15;            // Update interval in minutes
 
         double m_gapThreshold;
         int m_triggerVolume;
@@ -2529,6 +2660,14 @@ private:
             constrain = std::max(m_selfConstrain,constrain);
 
             if (constrain>0 && m_pSignal->m_pos==0) return 0;
+            
+            // Check risk boundary breaks (only when not constrained)
+            if (constrain == 0)
+            {
+                double currentSpread = m_spAvg;
+                checkRiskBoundaryBreak(currentSpread, timeStamp);
+            }
+            
             int act = 0;
             switch (constrain)
             {
@@ -2571,6 +2710,348 @@ private:
             refreshMDStatus();
             refreshBollStatus();
             return 0;
+        }
+        
+        int sign(double val)
+        {
+            return (val > 0) ? 1 : ((val < 0) ? -1 : 0);
+        }
+        
+        std::string identifyLosingLeg(double spreadMom, const std::vector<double>& legPricesAtStart, const std::vector<double>& currentLegPrices)
+        {
+            if (m_pLegs.size() < 2 || legPricesAtStart.size() < 2 || currentLegPrices.size() < 2)
+            {
+                return "";
+            }
+            
+            // Calculate momentum for each leg
+            double baseMom = currentLegPrices[0] - legPricesAtStart[0];
+            double hedgeMom = currentLegPrices[1] - legPricesAtStart[1];
+            
+            int baseSign = baseMom > 0 ? 1 : (baseMom < 0 ? -1 : 0);
+            int hedgeSign = hedgeMom > 0 ? 1 : (hedgeMom < 0 ? -1 : 0);
+            int spreadSign = spreadMom > 0 ? 1 : (spreadMom < 0 ? -1 : 0);
+            
+            std::string losingLeg = "";
+            
+            // Logic from Python to identify losing leg
+            if (baseSign == hedgeSign)
+            {
+                if (spreadSign == baseSign)
+                {
+                    losingLeg = "base";
+                }
+                else
+                {
+                    losingLeg = "hedge";
+                }
+            }
+            else
+            {
+                if (std::abs(baseMom) >= std::abs(hedgeMom))
+                {
+                    if (spreadSign == baseSign)
+                    {
+                        losingLeg = "base";
+                    }
+                    else
+                    {
+                        losingLeg = "hedge";
+                    }
+                }
+                else
+                {
+                    if (spreadSign == baseSign)
+                    {
+                        losingLeg = "hedge";
+                    }
+                    else
+                    {
+                        losingLeg = "base";
+                    }
+                }
+            }
+            
+            g_pMercLog->log("[identifyLosingLeg],%s,baseMom,%g,hedgeMom,%g,spreadMom,%g,baseSign,%d,hedgeSign,%d,spreadSign,%d,losingLeg,%s",
+                m_sprdNm.c_str(), baseMom, hedgeMom, spreadMom, baseSign, hedgeSign, spreadSign, losingLeg.c_str());
+            
+            return losingLeg;
+        }
+        
+        void checkRiskBoundaryBreak(double currentSpread, int timeStamp)
+        {
+            // Check if we need to enter risk mode
+            if (!m_pSignal->m_inRiskMode)
+            {
+                double center = (m_arbitrageLower + m_arbitrageUpper) / 2.0;
+                
+                if (currentSpread > m_riskUpper)
+                {
+                    // Upper boundary break
+                    m_pSignal->m_inRiskMode = true;
+                    m_pSignal->m_breakDirection = 1;
+                    m_pSignal->m_maxSpread = currentSpread;
+                    m_pSignal->m_centerAtRiskStart = center;
+                    
+                    // Store current leg prices
+                    m_pSignal->m_legPricesAtRiskStart.clear();
+                    for (auto pLeg : m_pLegs)
+                    {
+                        m_pSignal->m_legPricesAtRiskStart.push_back(pLeg->LP());
+                    }
+                    
+                    g_pMercLog->log("[checkRiskBoundaryBreak],%s,UPPER_BREAK,spread,%g,riskUpper,%g,center,%g",
+                        m_sprdNm.c_str(), currentSpread, m_riskUpper, center);
+                    
+                    // Trigger position reduction
+                    reduceLosingLegPosition(currentSpread, timeStamp);
+                }
+                else if (currentSpread < m_riskLower)
+                {
+                    // Lower boundary break
+                    m_pSignal->m_inRiskMode = true;
+                    m_pSignal->m_breakDirection = -1;
+                    m_pSignal->m_minSpread = currentSpread;
+                    m_pSignal->m_centerAtRiskStart = center;
+                    
+                    // Store current leg prices
+                    m_pSignal->m_legPricesAtRiskStart.clear();
+                    for (auto pLeg : m_pLegs)
+                    {
+                        m_pSignal->m_legPricesAtRiskStart.push_back(pLeg->LP());
+                    }
+                    
+                    g_pMercLog->log("[checkRiskBoundaryBreak],%s,LOWER_BREAK,spread,%g,riskLower,%g,center,%g",
+                        m_sprdNm.c_str(), currentSpread, m_riskLower, center);
+                    
+                    // Trigger position reduction
+                    reduceLosingLegPosition(currentSpread, timeStamp);
+                }
+            }
+            else
+            {
+                // Already in risk mode - check for rebound
+                checkReboundAndRestore(currentSpread, timeStamp);
+            }
+        }
+        
+        void reduceLosingLegPosition(double currentSpread, int timeStamp)
+        {
+            if (m_pLegs.size() < 2 || m_pSignal->m_legPricesAtRiskStart.empty())
+            {
+                return;
+            }
+            
+            // Calculate momentum
+            double spreadMom = currentSpread - m_pSignal->m_centerAtRiskStart;
+            
+            std::vector<double> currentLegPrices;
+            for (auto pLeg : m_pLegs)
+            {
+                currentLegPrices.push_back(pLeg->LP());
+            }
+            
+            // Identify losing leg
+            std::string losingLeg = identifyLosingLeg(spreadMom, m_pSignal->m_legPricesAtRiskStart, currentLegPrices);
+            
+            if (losingLeg.empty())
+            {
+                return;
+            }
+            
+            m_pSignal->m_reducedLeg = losingLeg;
+            
+            // Calculate how much to reduce
+            int legIndex = (losingLeg == "base") ? 0 : 1;
+            CFutureExtentionAE* pLeg = m_pLegs[legIndex];
+            
+            // Get current position of this leg
+            int legPos = pLeg->pos();
+            double absLegPos = std::abs(static_cast<double>(legPos));
+            
+            m_pSignal->m_maxVirtualAbs = absLegPos;
+            
+            double amountToReduce = m_reduceRatio * absLegPos;
+            
+            // Round to step size if needed
+            if (m_stepSize > 0)
+            {
+                amountToReduce = std::floor(amountToReduce / m_stepSize) * m_stepSize;
+            }
+            
+            if (amountToReduce > 0 && legPos != 0)
+            {
+                int reduceDirection = -sign(static_cast<double>(legPos));
+                m_pSignal->m_reducedDirection = reduceDirection;
+                m_pSignal->m_reducedAmount = amountToReduce;
+                
+                // Calculate the order size for this leg
+                int orderVolume = static_cast<int>(amountToReduce);
+                
+                // Place order to reduce losing leg position
+                // Direction: if legPos > 0 (long), need to sell (reduceDirection = -1)
+                //            if legPos < 0 (short), need to buy (reduceDirection = 1)
+                int orderDirection = (reduceDirection > 0) ? D_Buy : D_Sell;
+                
+                // Use market-making price with small adjustment
+                double orderPrice;
+                if (reduceDirection > 0)
+                {
+                    // Buying to reduce short position
+                    orderPrice = pLeg->AP() + pLeg->tick() * m_pEnv->m_tryOrderPriceAdjustTicks;
+                    orderPrice = std::min(orderPrice, pLeg->upperLimitPrice());
+                }
+                else
+                {
+                    // Selling to reduce long position
+                    orderPrice = pLeg->BP() - pLeg->tick() * m_pEnv->m_tryOrderPriceAdjustTicks;
+                    orderPrice = std::max(orderPrice, pLeg->lowerLimitPrice());
+                }
+                
+                // Send order through the strategy's order system
+                // This creates a single-leg order (not a spread)
+                CInputOrder inputOrder;
+                inputOrder.setOrderType(ODT_Limit);
+                inputOrder.setDirection(orderDirection);
+                inputOrder.setPrice(orderPrice);
+                inputOrder.setOrderVolume(orderVolume);
+                
+                const CMercStrategyOrderItem *pOrderItem = m_pStrategy->controledInsertOrder(
+                    &inputOrder, 
+                    pLeg->pInstrument(), 
+                    m_pStrategy->getAccountManager(),
+                    m_pEnv->m_offsetStrategy
+                );
+                
+                if (pOrderItem != NULL)
+                {
+                    // Track this as a risk management position
+                    m_pSignal->m_riskPos += reduceDirection * orderVolume;
+                    
+                    g_pMercLog->log("[reduceLosingLegPosition],%s,ORDER_SENT,losingLeg,%s,legPos,%d,orderVolume,%d,orderDirection,%d,orderPrice,%g,riskPos,%d",
+                        m_sprdNm.c_str(), losingLeg.c_str(), legPos, orderVolume, orderDirection, orderPrice, m_pSignal->m_riskPos);
+                }
+                else
+                {
+                    g_pMercLog->log("[reduceLosingLegPosition],%s,ORDER_FAILED,losingLeg,%s,legPos,%d,orderVolume,%d",
+                        m_sprdNm.c_str(), losingLeg.c_str(), legPos, orderVolume);
+                }
+            }
+        }
+        
+        void checkReboundAndRestore(double currentSpread, int timeStamp)
+        {
+            if (m_pSignal->m_reducedLeg.empty())
+            {
+                return;
+            }
+            
+            bool shouldRestore = false;
+            double reboundAmount = m_exitInterval; // Use exit interval as rebound threshold
+            
+            if (m_pSignal->m_breakDirection == 1)
+            {
+                // Upper break - check for downward rebound
+                if (currentSpread > m_pSignal->m_maxSpread)
+                {
+                    m_pSignal->m_maxSpread = currentSpread;
+                }
+                
+                if (currentSpread <= m_pSignal->m_maxSpread - reboundAmount)
+                {
+                    shouldRestore = true;
+                    g_pMercLog->log("[checkReboundAndRestore],%s,REBOUND_DOWN,currentSpread,%g,maxSpread,%g,reboundAmount,%g",
+                        m_sprdNm.c_str(), currentSpread, m_pSignal->m_maxSpread, reboundAmount);
+                }
+            }
+            else if (m_pSignal->m_breakDirection == -1)
+            {
+                // Lower break - check for upward rebound
+                if (currentSpread < m_pSignal->m_minSpread)
+                {
+                    m_pSignal->m_minSpread = currentSpread;
+                }
+                
+                if (currentSpread >= m_pSignal->m_minSpread + reboundAmount)
+                {
+                    shouldRestore = true;
+                    g_pMercLog->log("[checkReboundAndRestore],%s,REBOUND_UP,currentSpread,%g,minSpread,%g,reboundAmount,%g",
+                        m_sprdNm.c_str(), currentSpread, m_pSignal->m_minSpread, reboundAmount);
+                }
+            }
+            
+            // Also check if all positions are closed
+            if (m_pSignal->m_openPositions.empty())
+            {
+                shouldRestore = true;
+                g_pMercLog->log("[checkReboundAndRestore],%s,ALL_POSITIONS_CLOSED", m_sprdNm.c_str());
+            }
+            
+            if (shouldRestore)
+            {
+                // Restore the reduced position
+                int signedSupplement = -m_pSignal->m_reducedDirection * static_cast<int>(m_pSignal->m_reducedAmount);
+                
+                if (signedSupplement != 0)
+                {
+                    // Get the leg that was reduced
+                    int legIndex = (m_pSignal->m_reducedLeg == "base") ? 0 : 1;
+                    CFutureExtentionAE* pLeg = m_pLegs[legIndex];
+                    
+                    int orderVolume = std::abs(signedSupplement);
+                    int orderDirection = (signedSupplement > 0) ? D_Buy : D_Sell;
+                    
+                    // Use market-making price with small adjustment
+                    double orderPrice;
+                    if (signedSupplement > 0)
+                    {
+                        // Buying to restore
+                        orderPrice = pLeg->AP() + pLeg->tick() * m_pEnv->m_tryOrderPriceAdjustTicks;
+                        orderPrice = std::min(orderPrice, pLeg->upperLimitPrice());
+                    }
+                    else
+                    {
+                        // Selling to restore
+                        orderPrice = pLeg->BP() - pLeg->tick() * m_pEnv->m_tryOrderPriceAdjustTicks;
+                        orderPrice = std::max(orderPrice, pLeg->lowerLimitPrice());
+                    }
+                    
+                    // Send order to restore position
+                    CInputOrder inputOrder;
+                    inputOrder.setOrderType(ODT_Limit);
+                    inputOrder.setDirection(orderDirection);
+                    inputOrder.setPrice(orderPrice);
+                    inputOrder.setOrderVolume(orderVolume);
+                    
+                    const CMercStrategyOrderItem *pOrderItem = m_pStrategy->controledInsertOrder(
+                        &inputOrder, 
+                        pLeg->pInstrument(), 
+                        m_pStrategy->getAccountManager(),
+                        m_pEnv->m_offsetStrategy
+                    );
+                    
+                    if (pOrderItem != NULL)
+                    {
+                        // Update risk position tracking
+                        m_pSignal->m_riskPos += signedSupplement;
+                        
+                        g_pMercLog->log("[checkReboundAndRestore],%s,ORDER_SENT,leg,%s,orderVolume,%d,orderDirection,%d,orderPrice,%g,riskPos,%d",
+                            m_sprdNm.c_str(), m_pSignal->m_reducedLeg.c_str(), orderVolume, orderDirection, orderPrice, m_pSignal->m_riskPos);
+                    }
+                    else
+                    {
+                        g_pMercLog->log("[checkReboundAndRestore],%s,ORDER_FAILED,leg,%s,orderVolume,%d",
+                            m_sprdNm.c_str(), m_pSignal->m_reducedLeg.c_str(), orderVolume);
+                    }
+                }
+                
+                // Reset risk mode
+                m_pSignal->m_inRiskMode = false;
+                m_pSignal->m_reducedLeg = "";
+                m_pSignal->m_reducedAmount = 0.0;
+                m_pSignal->m_reducedDirection = 0;
+                m_pSignal->m_breakDirection = 0;
+            }
         }
 
         int updateSignal(bool &toSyncData, bool closeOnly=false)
@@ -2642,10 +3123,335 @@ private:
             }
             return trdSz;
         }
+        
+        void updateDailyHighLow(int tradingDay, double currentSpread)
+        {
+            // Update current day tracking
+            if (m_pSignal->m_currentDay != tradingDay)
+            {
+                // New day - save previous day's high/low
+                if (m_pSignal->m_currentDay > 0)
+                {
+                    CDailyHighLow dayData(m_pSignal->m_currentDay, 
+                                         m_pSignal->m_currentDayHigh, 
+                                         m_pSignal->m_currentDayLow);
+                    m_pSignal->m_dailyHighLows.push_back(dayData);
+                    
+                    // Keep only max history days
+                    while (m_pSignal->m_dailyHighLows.size() > static_cast<size_t>(m_pSignal->m_maxHistoryDays))
+                    {
+                        m_pSignal->m_dailyHighLows.pop_front();
+                    }
+                }
+                
+                // Reset for new day
+                m_pSignal->m_currentDay = tradingDay;
+                m_pSignal->m_currentDayHigh = currentSpread;
+                m_pSignal->m_currentDayLow = currentSpread;
+            }
+            else
+            {
+                // Update current day's high/low
+                if (currentSpread > m_pSignal->m_currentDayHigh)
+                {
+                    m_pSignal->m_currentDayHigh = currentSpread;
+                }
+                if (currentSpread < m_pSignal->m_currentDayLow)
+                {
+                    m_pSignal->m_currentDayLow = currentSpread;
+                }
+            }
+        }
+        
+        void calculateBoundaries(int tradingDay, double currentSpread)
+        {
+            // Update daily high/low first
+            updateDailyHighLow(tradingDay, currentSpread);
+            
+            // Calculate arbitrage boundaries from last N days
+            double arbLower = DBL_MAX;
+            double arbUpper = -DBL_MAX;
+            
+            // Include current day
+            if (m_pSignal->m_currentDayHigh > arbUpper)
+            {
+                arbUpper = m_pSignal->m_currentDayHigh;
+            }
+            if (m_pSignal->m_currentDayLow < arbLower)
+            {
+                arbLower = m_pSignal->m_currentDayLow;
+            }
+            
+            // Look back arbitrageN days
+            int lookbackDays = 0;
+            for (auto it = m_pSignal->m_dailyHighLows.rbegin(); 
+                 it != m_pSignal->m_dailyHighLows.rend() && lookbackDays < m_arbitrageN; 
+                 ++it, ++lookbackDays)
+            {
+                if (it->dailyHigh > arbUpper)
+                {
+                    arbUpper = it->dailyHigh;
+                }
+                if (it->dailyLow < arbLower)
+                {
+                    arbLower = it->dailyLow;
+                }
+            }
+            
+            // Calculate risk boundaries from last riskN days
+            double riskLower = DBL_MAX;
+            double riskUpper = -DBL_MAX;
+            
+            // Include current day
+            if (m_pSignal->m_currentDayHigh > riskUpper)
+            {
+                riskUpper = m_pSignal->m_currentDayHigh;
+            }
+            if (m_pSignal->m_currentDayLow < riskLower)
+            {
+                riskLower = m_pSignal->m_currentDayLow;
+            }
+            
+            // Look back riskN days
+            lookbackDays = 0;
+            for (auto it = m_pSignal->m_dailyHighLows.rbegin(); 
+                 it != m_pSignal->m_dailyHighLows.rend() && lookbackDays < m_riskN; 
+                 ++it, ++lookbackDays)
+            {
+                if (it->dailyHigh > riskUpper)
+                {
+                    riskUpper = it->dailyHigh;
+                }
+                if (it->dailyLow < riskLower)
+                {
+                    riskLower = it->dailyLow;
+                }
+            }
+            
+            // Update boundaries
+            m_arbitrageLower = arbLower;
+            m_arbitrageUpper = arbUpper;
+            m_riskLower = riskLower;
+            m_riskUpper = riskUpper;
+            
+            g_pMercLog->log("[calculateBoundaries],%s,day,%d,arbLower,%g,arbUpper,%g,riskLower,%g,riskUpper,%g",
+                m_sprdNm.c_str(), tradingDay, arbLower, arbUpper, riskLower, riskUpper);
+        }
+
+        void updateBoundariesAndGrids(double newArbitrageLower, double newArbitrageUpper, double newRiskLower, double newRiskUpper)
+        {
+            // Check if boundaries have changed
+            bool boundariesChanged = (newArbitrageLower != m_pSignal->m_prevArbitrageLower || 
+                                     newArbitrageUpper != m_pSignal->m_prevArbitrageUpper);
+            
+            if (!boundariesChanged)
+            {
+                return;
+            }
+            
+            g_pMercLog->log("[updateBoundariesAndGrids],%s,ArbLower,%g->%g,ArbUpper,%g->%g",
+                m_sprdNm.c_str(), m_pSignal->m_prevArbitrageLower, newArbitrageLower,
+                m_pSignal->m_prevArbitrageUpper, newArbitrageUpper);
+            
+            // Update boundary values
+            m_arbitrageLower = newArbitrageLower;
+            m_arbitrageUpper = newArbitrageUpper;
+            m_riskLower = newRiskLower;
+            m_riskUpper = newRiskUpper;
+            
+            double boundDistance = m_arbitrageUpper - m_arbitrageLower;
+            if (boundDistance <= 0)
+            {
+                return;
+            }
+            
+            // Adjust dynamic factors based on profitable rates
+            double profitableRateLong = 0.0;
+            double profitableRateShort = 0.0;
+            
+            if (m_pSignal->m_numOpensLong > 0)
+            {
+                profitableRateLong = static_cast<double>(m_pSignal->m_profitableClosesLong) / m_pSignal->m_numOpensLong;
+            }
+            
+            if (m_pSignal->m_numOpensShort > 0)
+            {
+                profitableRateShort = static_cast<double>(m_pSignal->m_profitableClosesShort) / m_pSignal->m_numOpensShort;
+            }
+            
+            // Adjust long dynamic factor
+            if (m_pSignal->m_numOpensLong >= m_minOps)
+            {
+                if (profitableRateLong < m_widenThreshold)
+                {
+                    // Low profitable rate - widen grid to reduce frequency
+                    m_pSignal->m_dynamicFactorLong *= m_widenStep;
+                }
+                else if (profitableRateLong > m_narrowThreshold)
+                {
+                    // High profitable rate - narrow grid to increase frequency
+                    m_pSignal->m_dynamicFactorLong /= m_widenStep;
+                }
+                // Clamp to min/max range
+                m_pSignal->m_dynamicFactorLong = std::max(m_minDynamic, std::min(m_maxDynamic, m_pSignal->m_dynamicFactorLong));
+            }
+            
+            // Adjust short dynamic factor
+            if (m_pSignal->m_numOpensShort >= m_minOps)
+            {
+                if (profitableRateShort < m_widenThreshold)
+                {
+                    m_pSignal->m_dynamicFactorShort *= m_widenStep;
+                }
+                else if (profitableRateShort > m_narrowThreshold)
+                {
+                    m_pSignal->m_dynamicFactorShort /= m_widenStep;
+                }
+                m_pSignal->m_dynamicFactorShort = std::max(m_minDynamic, std::min(m_maxDynamic, m_pSignal->m_dynamicFactorShort));
+            }
+            
+            g_pMercLog->log("[updateBoundariesAndGrids],%s,ProfitRateLong,%g,ProfitRateShort,%g,DynFactorLong,%g,DynFactorShort,%g",
+                m_sprdNm.c_str(), profitableRateLong, profitableRateShort,
+                m_pSignal->m_dynamicFactorLong, m_pSignal->m_dynamicFactorShort);
+            
+            // Recalculate grids with new factors
+            double equityPerSet = 0.0;
+            for (int i = 0; i < m_pLegs.size(); i++)
+            {
+                equityPerSet += std::abs(m_coefs[i]) * m_pLegs[i]->LP();
+            }
+            
+            int currentMaxSets = m_manSprdMaxLot;
+            if (equityPerSet > 0 && m_maxLeverage > 0)
+            {
+                double currentCash = 100000.0; // TODO: Get from account
+                int leverageMaxSets = static_cast<int>(currentCash * m_maxLeverage / equityPerSet);
+                if (currentMaxSets == 0 || leverageMaxSets < currentMaxSets)
+                {
+                    currentMaxSets = leverageMaxSets;
+                }
+            }
+            if (currentMaxSets <= 0) currentMaxSets = 1;
+            
+            double entryInterval = (boundDistance / 2.0) / currentMaxSets;
+            if (entryInterval < m_minEntryInterval)
+            {
+                entryInterval = m_minEntryInterval;
+            }
+            
+            double entryIntervalLong = entryInterval * m_pSignal->m_dynamicFactorLong;
+            double entryIntervalShort = entryInterval * m_pSignal->m_dynamicFactorShort;
+            double center = (m_arbitrageLower + m_arbitrageUpper) / 2.0;
+            double centerLong = center - m_exitInterval / 2.0;
+            double centerShort = center + m_exitInterval / 2.0;
+            
+            // Store old grids for position adjustment
+            std::vector<double> oldLongGrids = m_pSignal->m_longGrids;
+            std::vector<double> oldShortGrids = m_pSignal->m_shortGrids;
+            
+            // Generate new grids
+            m_pSignal->m_longGrids.clear();
+            m_pSignal->m_shortGrids.clear();
+            
+            for (int k = 1; k <= m_maxGridLevels; k++)
+            {
+                m_pSignal->m_longGrids.push_back(centerLong - k * entryIntervalLong);
+                m_pSignal->m_shortGrids.push_back(centerShort + k * entryIntervalShort);
+            }
+            
+            // Adjust existing open positions to new grid levels
+            // TODO: Implement position adjustment when we add position tracking
+            
+            // Update previous boundary tracking
+            m_pSignal->m_prevArbitrageLower = newArbitrageLower;
+            m_pSignal->m_prevArbitrageUpper = newArbitrageUpper;
+            
+            // Store intervals for reference
+            m_pSignal->m_entryIntervalLong = entryIntervalLong;
+            m_pSignal->m_entryIntervalShort = entryIntervalShort;
+        }
 
         void updtBuySell(double &buy, double &sell)
         {
-            buy = -DBL_MAX; sell = DBL_MAX;
+            // Default values if grid not configured
+            buy = -DBL_MAX; 
+            sell = DBL_MAX;
+            
+            // Skip if grid parameters not configured
+            if (m_exitInterval <= 0.0 || m_arbitrageLower >= m_arbitrageUpper)
+            {
+                return;
+            }
+            
+            // Calculate base entry interval
+            double boundDistance = m_arbitrageUpper - m_arbitrageLower;
+            double currentCash = 100000.0; // TODO: Get from account or config
+            double equityPerSet = 0.0;
+            
+            for (int i = 0; i < m_pLegs.size(); i++)
+            {
+                equityPerSet += std::abs(m_coefs[i]) * m_pLegs[i]->LP();
+            }
+            
+            int currentMaxSets = m_manSprdMaxLot;
+            if (equityPerSet > 0 && m_maxLeverage > 0)
+            {
+                int leverageMaxSets = static_cast<int>(currentCash * m_maxLeverage / equityPerSet);
+                if (currentMaxSets == 0 || leverageMaxSets < currentMaxSets)
+                {
+                    currentMaxSets = leverageMaxSets;
+                }
+            }
+            if (currentMaxSets <= 0) currentMaxSets = 1;
+            
+            // Calculate entry interval
+            double entryInterval = (boundDistance / 2.0) / currentMaxSets;
+            if (entryInterval < m_minEntryInterval)
+            {
+                entryInterval = m_minEntryInterval;
+            }
+            
+            // Apply dynamic factors
+            double entryIntervalLong = entryInterval * m_pSignal->m_dynamicFactorLong;
+            double entryIntervalShort = entryInterval * m_pSignal->m_dynamicFactorShort;
+            
+            // Calculate centers
+            double center = (m_arbitrageLower + m_arbitrageUpper) / 2.0;
+            double centerLong = center - m_exitInterval / 2.0;
+            double centerShort = center + m_exitInterval / 2.0;
+            
+            // Determine buy/sell based on position
+            int pos = m_pSignal->m_pos;
+            
+            if (pos == 0)
+            {
+                // No position - use center-based pricing
+                buy = centerLong;
+                sell = centerShort;
+            }
+            else if (pos > 0)
+            {
+                // Long position - calculate next level for adding or closing
+                // For closing: current position + exit_interval
+                sell = centerLong + std::abs(pos) * entryIntervalLong / m_stepSize + m_exitInterval;
+                
+                // For adding: next grid level down
+                buy = centerLong - (std::abs(pos) / m_stepSize + 1) * entryIntervalLong;
+            }
+            else // pos < 0
+            {
+                // Short position - calculate next level for adding or closing
+                // For closing: current position - exit_interval
+                buy = centerShort - std::abs(pos) * entryIntervalShort / m_stepSize - m_exitInterval;
+                
+                // For adding: next grid level up
+                sell = centerShort + (std::abs(pos) / m_stepSize + 1) * entryIntervalShort;
+            }
+            
+            // Store calculated intervals for tracking
+            m_pSignal->m_entryIntervalLong = entryIntervalLong;
+            m_pSignal->m_entryIntervalShort = entryIntervalShort;
+            
             return;
         }
 
@@ -2760,8 +3566,91 @@ private:
 
         void notifyExecFinished(int spreadTrdVolume,double spreadTrdPrice,int timeStamp, double spreadExePrice)
         {
+            int prevPos = m_pSignal->m_pos;
+            
             notifyOpenTrade(spreadTrdVolume,spreadTrdPrice, spreadExePrice);
             m_pSignal->m_pos += spreadTrdVolume;
+            
+            // Track opens and closes for dynamic grid adjustment
+            bool isOpening = (prevPos == 0 || (prevPos > 0 && spreadTrdVolume > 0) || (prevPos < 0 && spreadTrdVolume < 0));
+            bool isClosing = (prevPos > 0 && spreadTrdVolume < 0) || (prevPos < 0 && spreadTrdVolume > 0);
+            
+            if (isOpening)
+            {
+                // Store leg prices at entry for risk management
+                std::vector<double> legPricesAtEntry;
+                for (auto pLeg : m_pLegs)
+                {
+                    legPricesAtEntry.push_back(pLeg->LP());
+                }
+                
+                // Add to open positions list with leg prices
+                int direction = spreadTrdVolume > 0 ? 1 : -1;
+                COpenPosition newPos(spreadTrdPrice, direction, spreadExePrice, legPricesAtEntry);
+                m_pSignal->m_openPositions.push_back(newPos);
+                
+                if (spreadTrdVolume > 0)
+                {
+                    m_pSignal->m_numOpensLong++;
+                }
+                else if (spreadTrdVolume < 0)
+                {
+                    m_pSignal->m_numOpensShort++;
+                }
+                
+                g_pMercLog->log("[notifyExecFinished],%s,OPEN,vol,%d,entryPrice,%g,spread,%g,legPricesCount,%lu",
+                    m_sprdNm.c_str(), spreadTrdVolume, spreadTrdPrice, spreadExePrice, legPricesAtEntry.size());
+            }
+            
+            if (isClosing)
+            {
+                // Calculate if this was profitable and remove from open positions
+                double pnl = 0.0;
+                if (prevPos > 0 && spreadTrdVolume < 0)
+                {
+                    // Closing long
+                    pnl = (spreadExePrice - m_pSignal->m_atp) * std::abs(spreadTrdVolume);
+                    m_pSignal->m_numClosesLong++;
+                    if (pnl > 0)
+                    {
+                        m_pSignal->m_profitableClosesLong++;
+                    }
+                    
+                    // Remove oldest long position
+                    for (auto it = m_pSignal->m_openPositions.begin(); it != m_pSignal->m_openPositions.end(); ++it)
+                    {
+                        if (it->direction == 1)
+                        {
+                            m_pSignal->m_openPositions.erase(it);
+                            break;
+                        }
+                    }
+                }
+                else if (prevPos < 0 && spreadTrdVolume > 0)
+                {
+                    // Closing short
+                    pnl = (m_pSignal->m_atp - spreadExePrice) * std::abs(spreadTrdVolume);
+                    m_pSignal->m_numClosesShort++;
+                    if (pnl > 0)
+                    {
+                        m_pSignal->m_profitableClosesShort++;
+                    }
+                    
+                    // Remove oldest short position
+                    for (auto it = m_pSignal->m_openPositions.begin(); it != m_pSignal->m_openPositions.end(); ++it)
+                    {
+                        if (it->direction == -1)
+                        {
+                            m_pSignal->m_openPositions.erase(it);
+                            break;
+                        }
+                    }
+                }
+                
+                g_pMercLog->log("[notifyExecFinished],%s,CLOSE,vol,%d,pnl,%g,openPosCount,%lu",
+                    m_sprdNm.c_str(), spreadTrdVolume, pnl, m_pSignal->m_openPositions.size());
+            }
+            
             refreshPos();
 
             internalConstrain();
@@ -3073,6 +3962,37 @@ public:
             outJ["di_pnls"][sprdNm] = pSprd.second->m_pSignal->m_diPnl;
             outJ["dn_pnls"][sprdNm] = pSprd.second->m_pSignal->m_dnPnl;
             outJ["pnls"][sprdNm] = pSprd.second->m_pSignal->m_pnl;
+            
+            // Persist dynamic grid state
+            outJ["dynamic_factor_long"][sprdNm] = pSprd.second->m_pSignal->m_dynamicFactorLong;
+            outJ["dynamic_factor_short"][sprdNm] = pSprd.second->m_pSignal->m_dynamicFactorShort;
+            outJ["num_opens_long"][sprdNm] = pSprd.second->m_pSignal->m_numOpensLong;
+            outJ["num_opens_short"][sprdNm] = pSprd.second->m_pSignal->m_numOpensShort;
+            outJ["profitable_closes_long"][sprdNm] = pSprd.second->m_pSignal->m_profitableClosesLong;
+            outJ["profitable_closes_short"][sprdNm] = pSprd.second->m_pSignal->m_profitableClosesShort;
+            
+            // Persist risk management state
+            outJ["in_risk_mode"][sprdNm] = pSprd.second->m_pSignal->m_inRiskMode;
+            outJ["reduced_leg"][sprdNm] = pSprd.second->m_pSignal->m_reducedLeg;
+            outJ["reduced_amount"][sprdNm] = pSprd.second->m_pSignal->m_reducedAmount;
+            outJ["reduced_direction"][sprdNm] = pSprd.second->m_pSignal->m_reducedDirection;
+            outJ["arbitrage_pos"][sprdNm] = pSprd.second->m_pSignal->m_arbitragePos;
+            outJ["risk_pos"][sprdNm] = pSprd.second->m_pSignal->m_riskPos;
+            
+            // Persist daily high/low history
+            json dailyHighLowsArray = json::array();
+            for (const auto& dayData : pSprd.second->m_pSignal->m_dailyHighLows)
+            {
+                json dayObj;
+                dayObj["day"] = dayData.tradingDay;
+                dayObj["high"] = dayData.dailyHigh;
+                dayObj["low"] = dayData.dailyLow;
+                dailyHighLowsArray.push_back(dayObj);
+            }
+            outJ["daily_high_lows"][sprdNm] = dailyHighLowsArray;
+            outJ["current_day"][sprdNm] = pSprd.second->m_pSignal->m_currentDay;
+            outJ["current_day_high"][sprdNm] = pSprd.second->m_pSignal->m_currentDayHigh;
+            outJ["current_day_low"][sprdNm] = pSprd.second->m_pSignal->m_currentDayLow;
         }
         outJ["trd_sprds"] = trdSprds;
         outJ["sprds"] = spreads;
@@ -3399,6 +4319,52 @@ public:
                 {
                     pSpread->m_stepSize = pSpread->m_pSignal->m_stepSize = stpLot;
                 }
+            }
+            
+            // Load dynamic grid strategy parameters from XML (if provided)
+            // These parameters can be specified globally in the Strategy XML node
+            const CXMLNode *pStrategyDesc = getStrategyDesc();
+            if (pStrategyDesc != nullptr)
+            {
+                pSpread->m_exitInterval = pStrategyDesc->getDoubleProperty("GridExitInterval", 0.0);
+                pSpread->m_minEntryInterval = pStrategyDesc->getDoubleProperty("MinEntryInterval", 0.0);
+                pSpread->m_minDynamic = pStrategyDesc->getDoubleProperty("MinDynamicFactor", 1.0);
+                pSpread->m_maxDynamic = pStrategyDesc->getDoubleProperty("MaxDynamicFactor", 3.0);
+                pSpread->m_widenThreshold = pStrategyDesc->getDoubleProperty("WidenThreshold", 0.3);
+                pSpread->m_narrowThreshold = pStrategyDesc->getDoubleProperty("NarrowThreshold", 0.7);
+                pSpread->m_widenStep = pStrategyDesc->getDoubleProperty("WidenStep", 1.2);
+                pSpread->m_minOps = pStrategyDesc->getIntProperty("MinOpsForAdjust", 10);
+                pSpread->m_reduceRatio = pStrategyDesc->getDoubleProperty("ReduceRatio", 0.6);
+                pSpread->m_maxLeverage = pStrategyDesc->getDoubleProperty("MaxLeverage", 20.0);
+                pSpread->m_maxGridLevels = pStrategyDesc->getIntProperty("MaxGridLevels", 500);
+                
+                // Boundary calculation window sizes
+                pSpread->m_arbitrageN = pStrategyDesc->getIntProperty("ArbitrageN", 120);
+                pSpread->m_riskN = pStrategyDesc->getIntProperty("RiskN", 180);
+                pSpread->m_updateIntervalMinutes = pStrategyDesc->getIntProperty("UpdateIntervalMinutes", 15);
+                
+                // Set max history days to keep
+                int maxHistoryDays = std::max(pSpread->m_arbitrageN, pSpread->m_riskN);
+                pSpread->m_pSignal->m_maxHistoryDays = maxHistoryDays + 10; // Keep a bit extra
+                
+                // Set initial boundary values (these will be updated dynamically)
+                pSpread->m_arbitrageLower = pStrategyDesc->getDoubleProperty("InitArbitrageLower", 0.0);
+                pSpread->m_arbitrageUpper = pStrategyDesc->getDoubleProperty("InitArbitrageUpper", 0.0);
+                pSpread->m_riskLower = pStrategyDesc->getDoubleProperty("InitRiskLower", 0.0);
+                pSpread->m_riskUpper = pStrategyDesc->getDoubleProperty("InitRiskUpper", 0.0);
+                
+                // Initialize signal's boundary tracking
+                if (pSpread->m_arbitrageLower > 0.0 || pSpread->m_arbitrageUpper > 0.0)
+                {
+                    pSpread->m_pSignal->m_prevArbitrageLower = pSpread->m_arbitrageLower;
+                    pSpread->m_pSignal->m_prevArbitrageUpper = pSpread->m_arbitrageUpper;
+                }
+                
+                g_pMercLog->log("[createSpreadsByManSprds],GridParams,sprd,%s,exitInterval,%g,minEntry,%g,minDyn,%g,maxDyn,%g,widen,%g,narrow,%g,reduceRatio,%g,maxLeverage,%g,arbN,%d,riskN,%d",
+                    manSprdNm.c_str(), pSpread->m_exitInterval, pSpread->m_minEntryInterval, 
+                    pSpread->m_minDynamic, pSpread->m_maxDynamic, pSpread->m_widenThreshold, 
+                    pSpread->m_narrowThreshold, pSpread->m_reduceRatio, pSpread->m_maxLeverage,
+                    pSpread->m_arbitrageN, pSpread->m_riskN);
             }
 
             pSpread->finishComb(pSignal);
