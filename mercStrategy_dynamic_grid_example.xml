@@ -27,6 +27,11 @@
         InitRiskLower="195.0"            <!-- Initial lower risk boundary -->
         InitRiskUpper="215.0"            <!-- Initial upper risk boundary -->
         
+        <!-- Boundary Calculation Windows -->
+        ArbitrageN="120"                 <!-- Days to lookback for arbitrage boundaries -->
+        RiskN="180"                      <!-- Days to lookback for risk boundaries -->
+        UpdateIntervalMinutes="15"       <!-- Interval in minutes to recalculate boundaries -->
+        
         <!-- Standard Parameters -->
         SlipTics="1" 
         MaxTradeSize="10000" 

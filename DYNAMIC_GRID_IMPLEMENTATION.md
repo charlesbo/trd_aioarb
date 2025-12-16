@@ -1,15 +1,19 @@
-# Dynamic Grid Strategy Implementation
+# Dynamic Grid Strategy Implementation - COMPLETE
 
-This document describes the implementation of the dynamic grid trading strategy from `vbt_dyn_grid.py` into the C++ `AioEZDG.cpp` Mercury trading system.
+This document describes the **complete** implementation of the dynamic grid trading strategy from `vbt_dyn_grid.py` into the C++ `AioEZDG.cpp` Mercury trading system, including all risk management features.
 
 ## Overview
 
-The dynamic grid strategy implements an adaptive grid trading system that:
+The dynamic grid strategy implements a comprehensive adaptive grid trading system that:
 - Opens positions at grid levels that adjust based on profitability
 - Automatically widens grids when losing money (to reduce frequency)
 - Automatically narrows grids when making money (to increase frequency)
 - Uses leverage-aware position sizing
 - Tracks performance separately for long and short sides
+- **Calculates boundaries from N-day high/low history**
+- **Identifies losing legs on risk boundary breaks**
+- **Reduces losing leg positions automatically**
+- **Restores positions on rebound detection**
 
 ## Architecture
 
