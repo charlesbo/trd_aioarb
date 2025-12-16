@@ -2885,12 +2885,57 @@ private:
                 m_pSignal->m_reducedDirection = reduceDirection;
                 m_pSignal->m_reducedAmount = amountToReduce;
                 
-                // Note: Actual order placement would happen through the execution system
-                // This is tracked separately from the arbitrage position
-                m_pSignal->m_riskPos += reduceDirection * static_cast<int>(amountToReduce);
+                // Calculate the order size for this leg
+                int orderVolume = static_cast<int>(amountToReduce);
                 
-                g_pMercLog->log("[reduceLosingLegPosition],%s,losingLeg,%s,legPos,%d,amountToReduce,%g,reduceDirection,%d,riskPos,%d",
-                    m_sprdNm.c_str(), losingLeg.c_str(), legPos, amountToReduce, reduceDirection, m_pSignal->m_riskPos);
+                // Place order to reduce losing leg position
+                // Direction: if legPos > 0 (long), need to sell (reduceDirection = -1)
+                //            if legPos < 0 (short), need to buy (reduceDirection = 1)
+                int orderDirection = (reduceDirection > 0) ? D_Buy : D_Sell;
+                
+                // Use market-making price with small adjustment
+                double orderPrice;
+                if (reduceDirection > 0)
+                {
+                    // Buying to reduce short position
+                    orderPrice = pLeg->AP() + pLeg->tick() * m_pEnv->m_tryOrderPriceAdjustTicks;
+                    orderPrice = std::min(orderPrice, pLeg->upperLimitPrice());
+                }
+                else
+                {
+                    // Selling to reduce long position
+                    orderPrice = pLeg->BP() - pLeg->tick() * m_pEnv->m_tryOrderPriceAdjustTicks;
+                    orderPrice = std::max(orderPrice, pLeg->lowerLimitPrice());
+                }
+                
+                // Send order through the strategy's order system
+                // This creates a single-leg order (not a spread)
+                CInputOrder inputOrder;
+                inputOrder.setOrderType(ODT_Limit);
+                inputOrder.setDirection(orderDirection);
+                inputOrder.setPrice(orderPrice);
+                inputOrder.setOrderVolume(orderVolume);
+                
+                const CMercStrategyOrderItem *pOrderItem = m_pStrategy->controledInsertOrder(
+                    &inputOrder, 
+                    pLeg->pInstrument(), 
+                    m_pStrategy->getAccountManager(),
+                    m_pEnv->m_offsetStrategy
+                );
+                
+                if (pOrderItem != NULL)
+                {
+                    // Track this as a risk management position
+                    m_pSignal->m_riskPos += reduceDirection * orderVolume;
+                    
+                    g_pMercLog->log("[reduceLosingLegPosition],%s,ORDER_SENT,losingLeg,%s,legPos,%d,orderVolume,%d,orderDirection,%d,orderPrice,%g,riskPos,%d",
+                        m_sprdNm.c_str(), losingLeg.c_str(), legPos, orderVolume, orderDirection, orderPrice, m_pSignal->m_riskPos);
+                }
+                else
+                {
+                    g_pMercLog->log("[reduceLosingLegPosition],%s,ORDER_FAILED,losingLeg,%s,legPos,%d,orderVolume,%d",
+                        m_sprdNm.c_str(), losingLeg.c_str(), legPos, orderVolume);
+                }
             }
         }
         
@@ -2947,11 +2992,58 @@ private:
                 // Restore the reduced position
                 int signedSupplement = -m_pSignal->m_reducedDirection * static_cast<int>(m_pSignal->m_reducedAmount);
                 
-                // Note: Actual order placement would happen through the execution system
-                m_pSignal->m_riskPos += signedSupplement;
-                
-                g_pMercLog->log("[checkReboundAndRestore],%s,RESTORE,leg,%s,supplement,%d,riskPos,%d",
-                    m_sprdNm.c_str(), m_pSignal->m_reducedLeg.c_str(), signedSupplement, m_pSignal->m_riskPos);
+                if (signedSupplement != 0)
+                {
+                    // Get the leg that was reduced
+                    int legIndex = (m_pSignal->m_reducedLeg == "base") ? 0 : 1;
+                    CFutureExtentionAE* pLeg = m_pLegs[legIndex];
+                    
+                    int orderVolume = std::abs(signedSupplement);
+                    int orderDirection = (signedSupplement > 0) ? D_Buy : D_Sell;
+                    
+                    // Use market-making price with small adjustment
+                    double orderPrice;
+                    if (signedSupplement > 0)
+                    {
+                        // Buying to restore
+                        orderPrice = pLeg->AP() + pLeg->tick() * m_pEnv->m_tryOrderPriceAdjustTicks;
+                        orderPrice = std::min(orderPrice, pLeg->upperLimitPrice());
+                    }
+                    else
+                    {
+                        // Selling to restore
+                        orderPrice = pLeg->BP() - pLeg->tick() * m_pEnv->m_tryOrderPriceAdjustTicks;
+                        orderPrice = std::max(orderPrice, pLeg->lowerLimitPrice());
+                    }
+                    
+                    // Send order to restore position
+                    CInputOrder inputOrder;
+                    inputOrder.setOrderType(ODT_Limit);
+                    inputOrder.setDirection(orderDirection);
+                    inputOrder.setPrice(orderPrice);
+                    inputOrder.setOrderVolume(orderVolume);
+                    
+                    const CMercStrategyOrderItem *pOrderItem = m_pStrategy->controledInsertOrder(
+                        &inputOrder, 
+                        pLeg->pInstrument(), 
+                        m_pStrategy->getAccountManager(),
+                        m_pEnv->m_offsetStrategy
+                    );
+                    
+                    if (pOrderItem != NULL)
+                    {
+                        // Update risk position tracking
+                        m_pSignal->m_riskPos += signedSupplement;
+                        
+                        g_pMercLog->log("[checkReboundAndRestore],%s,ORDER_SENT,leg,%s,orderVolume,%d,orderDirection,%d,orderPrice,%g,riskPos,%d",
+                            m_sprdNm.c_str(), m_pSignal->m_reducedLeg.c_str(), orderVolume, orderDirection, orderPrice, m_pSignal->m_riskPos);
+                    }
+                    else
+                    {
+                        g_pMercLog->log("[checkReboundAndRestore],%s,ORDER_FAILED,leg,%s,orderVolume,%d",
+                            m_sprdNm.c_str(), m_pSignal->m_reducedLeg.c_str(), orderVolume);
+                    }
+                }
                 
                 // Reset risk mode
                 m_pSignal->m_inRiskMode = false;
