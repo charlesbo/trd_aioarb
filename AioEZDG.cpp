@@ -343,12 +343,6 @@ private:
         double m_cancelRate;
         int m_logTrdFlw;
 
-        // Dynamic grid configuration parameters
-        double m_gridSpacing;        // Grid spacing in ticks (default 1.0)
-        int m_gridWidth;             // Number of grid levels (default 5)
-        double m_gridAsymmetry;      // Position-dependent asymmetry (default 0.5)
-        int m_usePositionGrid;       // Enable position-dependent grids (default 1)
-
         std::vector<std::string> m_manSprds;
         std::map<std::string, std::vector<double>> m_manSprdExeCoefs;
         std::map<std::string, std::vector<std::string>> m_manSprdInsts;
@@ -469,12 +463,6 @@ private:
             m_cancelRate = pDesc->getDoubleProperty("CancelRate",0.2);
 
             m_logTrdFlw = pDesc->getIntProperty("LogTrdFlw",1);
-
-            // Parse dynamic grid parameters
-            m_gridSpacing = pDesc->getDoubleProperty("GridSpacing", 1.0);
-            m_gridWidth = pDesc->getIntProperty("GridWidth", 5);
-            m_gridAsymmetry = pDesc->getDoubleProperty("GridAsymmetry", 0.5);
-            m_usePositionGrid = pDesc->getIntProperty("UsePositionGrid", 1);
 
             m_mrgnRt = pDesc->getDoubleProperty("MrgnRt", 0.0);
             strcpySafe(m_sprdConn, pDesc->getProperty("SprdConn", "-"));
@@ -763,11 +751,6 @@ private:
         double m_diPnl = 0.0;
         double m_dnPnl = 0.0;
         double m_pnl = 0.0;
-        
-        // Grid state persistence
-        double m_gridBuyLevel = -DBL_MAX;   // Current grid buy level
-        double m_gridSellLevel = DBL_MAX;   // Current grid sell level
-        int m_gridUpdateCount = 0;          // Count of grid updates
     };
  
     class CSpreadSignalManager
@@ -1932,12 +1915,6 @@ private:
         int m_bidQ;
         int m_askQ;
 
-        // Dynamic grid parameters
-        double m_gridSpacing;        // Grid spacing in ticks
-        int m_gridWidth;             // Number of grid levels on each side
-        double m_gridAsymmetry;      // Asymmetry factor for position-dependent grids
-        bool m_usePositionGrid;      // Enable position-dependent grid adjustment
-        
         double m_gapThreshold;
         int m_triggerVolume;
         double m_triggerPrice;
@@ -1985,13 +1962,6 @@ private:
             m_refBuy=-DBL_MAX;
             m_refSell=DBL_MAX;
             m_bidQ = m_askQ = 0;
-            
-            // Initialize dynamic grid parameters
-            m_gridSpacing = 1.0;       // Default 1 tick spacing
-            m_gridWidth = 5;           // Default 5 grid levels
-            m_gridAsymmetry = 0.5;     // Default asymmetry factor
-            m_usePositionGrid = true;  // Enable position-dependent grids by default
-            
             m_gapThreshold=0.0;
             m_triggerVolume=m_lastTrdVlm=0;
             m_triggerPrice=m_lastTrdPrice=0.0;
@@ -2326,20 +2296,12 @@ private:
         {
             m_pSignal = pSignal;
             syncSig2Obj();
-            
-            // Initialize grid parameters from environment
-            m_gridSpacing = m_pEnv->m_gridSpacing;
-            m_gridWidth = m_pEnv->m_gridWidth;
-            m_gridAsymmetry = m_pEnv->m_gridAsymmetry;
-            m_usePositionGrid = m_pEnv->m_usePositionGrid > 0;
-            
             adjMaxAmt();
             adjustPositionLimit(m_manSprdMaxLot);
             refreshPos();
             updateEdge();
             internalConstrain();
-            g_pMercLog->log("[finishComb],%s,prdMaxAmt,%g,sprdMaxTradeSize,%d,sprdMaxLot,%d,stepSize,%d,gridSpacing,%g,gridWidth,%d,gridAsymmetry,%g", 
-                m_sprdNm.c_str(), m_maxAmt, m_maxTradeSize, m_manSprdMaxLot, m_stepSize, m_gridSpacing, m_gridWidth, m_gridAsymmetry);
+            g_pMercLog->log("[finishComb],%s,prdMaxAmt,%g,sprdMaxTradeSize,%d,sprdMaxLot,%d,stepSize,%d", m_sprdNm.c_str(), m_maxAmt, m_maxTradeSize, m_manSprdMaxLot, m_stepSize);
         }
 
         void syncSig2Obj()
@@ -2683,87 +2645,8 @@ private:
 
         void updtBuySell(double &buy, double &sell)
         {
-            // Initialize to invalid values
-            buy = -DBL_MAX; 
-            sell = DBL_MAX;
-            
-            // Ensure we have valid reference mid price
-            if (m_refMid >= DBL_MAX || m_refMid <= -DBL_MAX)
-            {
-                return;
-            }
-            
-            // Get current position
-            int pos = m_pSignal != NULL ? m_pSignal->m_pos : 0;
-            
-            // Calculate base grid spacing
-            double gridTick = m_tick * m_gridSpacing;
-            
-            // Dynamic grid with position-dependent asymmetry
-            if (m_usePositionGrid && m_stepSize > 0)
-            {
-                // Calculate position-dependent grid offset
-                // When long (pos > 0), shift grid down to encourage selling
-                // When short (pos < 0), shift grid up to encourage buying
-                double positionBias = 0.0;
-                if (pos != 0)
-                {
-                    // Normalize position to number of step sizes
-                    double normalizedPos = static_cast<double>(pos) / m_stepSize;
-                    // Apply asymmetry: shift grid opposite to position
-                    positionBias = -normalizedPos * gridTick * m_gridAsymmetry;
-                }
-                
-                // Calculate grid levels around adjusted mid
-                double adjustedMid = m_refMid + positionBias;
-                
-                // Calculate buy level (below adjusted mid)
-                // Place buy order at a distance that increases with position
-                if (pos >= 0)
-                {
-                    // When flat or long, use wider spread for buying
-                    buy = adjustedMid - gridTick * (1.0 + abs(pos) / (2.0 * m_stepSize));
-                }
-                else
-                {
-                    // When short, use tighter spread to close position faster
-                    buy = adjustedMid - gridTick * 0.5;
-                }
-                
-                // Calculate sell level (above adjusted mid)
-                if (pos <= 0)
-                {
-                    // When flat or short, use wider spread for selling
-                    sell = adjustedMid + gridTick * (1.0 + abs(pos) / (2.0 * m_stepSize));
-                }
-                else
-                {
-                    // When long, use tighter spread to close position faster
-                    sell = adjustedMid + gridTick * 0.5;
-                }
-            }
-            else
-            {
-                // Simple symmetric grid without position adjustment
-                buy = m_refMid - gridTick;
-                sell = m_refMid + gridTick;
-            }
-            
-            // Round to tick size
-            buy = roundPrice(buy, m_tick);
-            sell = roundPrice(sell, m_tick);
-            
-            // Store for reference
-            m_refBuy = buy;
-            m_refSell = sell;
-            
-            // Persist grid state to signal
-            if (m_pSignal != NULL)
-            {
-                m_pSignal->m_gridBuyLevel = buy;
-                m_pSignal->m_gridSellLevel = sell;
-                m_pSignal->m_gridUpdateCount++;
-            }
+            buy = -DBL_MAX; sell = DBL_MAX;
+            return;
         }
 
         int squeezeSignal(int timeStamp)
