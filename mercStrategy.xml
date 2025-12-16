@@ -1,0 +1,13 @@
+<Strategies>
+    <Strategy name="ezca6_TTL" type="EZCA" accountID="90180012" Prod="TS-T-TL" ShmNmPrefix="env173_" TradeSize="1" EnableTrade="1" IsBacktest="0" SlipTics="1" MaxTradeSize="10000" FrontTradeSize="100" MinAvailable="100000" MinOI="2" AnnualRollMonth="0" FuzzySort="1" EdgeInPct="0.0005" EdgeInStd="0" AdjPosStep="5" MinGroups="1" MaxGroups="1" MaxSteps="0" MinSteps="3" MACount="2" PeriodSecond="900" TryOrderWaitTime="100" ForceOrderWaitTime="100" DayTrade="09:29:30" OnlyClose="15:14:30" DaySettle="15:14:55" NtEnd="23:00:01" DayEnd="15:15:01" CancelRate="0.7" UseCorr="1" ExpStd="1" UseRskMdl="1" UseRskMdlOnly="1" UseBkZone="1" UseFrtLogic="1" TrdVlm1="0" MinEDC="3" LtdD="5" LogTrdFlw="0" MrgnRt="0.1" UseWhlStep="0" UseAcp="1" FlexAcp="1" PosDecay="1.0" RskDecay="1.0" AcpDecayRate="0.0" RskRate="0.0" StdMaMulti="1.0" UseDecayEMA="0" UseBlkAcp="1" EmaCls="0" FrzMid="1" TryOrderPriceAdj="2">
+        <TradeSessions>
+            <Session start="09:30:05" end="11:29:50"/>
+            <Session start="13:00:05" end="15:14:50"/>
+        </TradeSessions>
+        <ManSprds>
+            <Sprd name="3T2509-TL2509" exeName="3T2509-TL2509" TrdTp="0" TrdRt="0" RefMid="206.7" SprdMaxLot="0" SprdStpLot="1" EdgeInPrLong="0.05" EdgeInPrShrt="0.05" MdstInPrLong="0.15" MdstInPrShrt="0.15" ClsEdgeInPrLong="0.8" ClsEdgeInPrShrt="0.8" ArbCfgDttm="20250513-09:40:00" />
+            <Sprd name="3T2512-TL2512" exeName="3T2512-TL2512" TrdTp="0" TrdRt="0" RefMid="206.7" SprdMaxLot="0" SprdStpLot="1" EdgeInPrLong="0.05" EdgeInPrShrt="0.05" MdstInPrLong="0.15" MdstInPrShrt="0.15" ClsEdgeInPrLong="0.8" ClsEdgeInPrShrt="0.8" ArbCfgDttm="20250804-13:40:00" />
+            <Sprd name="3T2603-TL2603" exeName="3T2603-TL2603" TrdTp="0" TrdRt="0" RefMid="206.7" SprdMaxLot="0" SprdStpLot="1" EdgeInPrLong="0.05" EdgeInPrShrt="0.05" MdstInPrLong="0.15" MdstInPrShrt="0.15" ClsEdgeInPrLong="0.8" ClsEdgeInPrShrt="0.8" ArbCfgDttm="20250804-13:40:00" />
+        </ManSprds>
+    </Strategy>
+</Strategies>
