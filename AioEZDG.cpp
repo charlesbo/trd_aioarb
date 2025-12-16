@@ -2704,6 +2704,139 @@ private:
             return trdSz;
         }
 
+        void updateBoundariesAndGrids(double newArbitrageLower, double newArbitrageUpper, double newRiskLower, double newRiskUpper)
+        {
+            // Check if boundaries have changed
+            bool boundariesChanged = (newArbitrageLower != m_pSignal->m_prevArbitrageLower || 
+                                     newArbitrageUpper != m_pSignal->m_prevArbitrageUpper);
+            
+            if (!boundariesChanged)
+            {
+                return;
+            }
+            
+            g_pMercLog->log("[updateBoundariesAndGrids],%s,ArbLower,%g->%g,ArbUpper,%g->%g",
+                m_sprdNm.c_str(), m_pSignal->m_prevArbitrageLower, newArbitrageLower,
+                m_pSignal->m_prevArbitrageUpper, newArbitrageUpper);
+            
+            // Update boundary values
+            m_arbitrageLower = newArbitrageLower;
+            m_arbitrageUpper = newArbitrageUpper;
+            m_riskLower = newRiskLower;
+            m_riskUpper = newRiskUpper;
+            
+            double boundDistance = m_arbitrageUpper - m_arbitrageLower;
+            if (boundDistance <= 0)
+            {
+                return;
+            }
+            
+            // Adjust dynamic factors based on profitable rates
+            double profitableRateLong = 0.0;
+            double profitableRateShort = 0.0;
+            
+            if (m_pSignal->m_numOpensLong > 0)
+            {
+                profitableRateLong = static_cast<double>(m_pSignal->m_profitableClosesLong) / m_pSignal->m_numOpensLong;
+            }
+            
+            if (m_pSignal->m_numOpensShort > 0)
+            {
+                profitableRateShort = static_cast<double>(m_pSignal->m_profitableClosesShort) / m_pSignal->m_numOpensShort;
+            }
+            
+            // Adjust long dynamic factor
+            if (m_pSignal->m_numOpensLong >= m_minOps)
+            {
+                if (profitableRateLong < m_widenThreshold)
+                {
+                    // Low profitable rate - widen grid to reduce frequency
+                    m_pSignal->m_dynamicFactorLong *= m_widenStep;
+                }
+                else if (profitableRateLong > m_narrowThreshold)
+                {
+                    // High profitable rate - narrow grid to increase frequency
+                    m_pSignal->m_dynamicFactorLong /= m_widenStep;
+                }
+                // Clamp to min/max range
+                m_pSignal->m_dynamicFactorLong = std::max(m_minDynamic, std::min(m_maxDynamic, m_pSignal->m_dynamicFactorLong));
+            }
+            
+            // Adjust short dynamic factor
+            if (m_pSignal->m_numOpensShort >= m_minOps)
+            {
+                if (profitableRateShort < m_widenThreshold)
+                {
+                    m_pSignal->m_dynamicFactorShort *= m_widenStep;
+                }
+                else if (profitableRateShort > m_narrowThreshold)
+                {
+                    m_pSignal->m_dynamicFactorShort /= m_widenStep;
+                }
+                m_pSignal->m_dynamicFactorShort = std::max(m_minDynamic, std::min(m_maxDynamic, m_pSignal->m_dynamicFactorShort));
+            }
+            
+            g_pMercLog->log("[updateBoundariesAndGrids],%s,ProfitRateLong,%g,ProfitRateShort,%g,DynFactorLong,%g,DynFactorShort,%g",
+                m_sprdNm.c_str(), profitableRateLong, profitableRateShort,
+                m_pSignal->m_dynamicFactorLong, m_pSignal->m_dynamicFactorShort);
+            
+            // Recalculate grids with new factors
+            double equityPerSet = 0.0;
+            for (int i = 0; i < m_pLegs.size(); i++)
+            {
+                equityPerSet += std::abs(m_coefs[i]) * m_pLegs[i]->LP();
+            }
+            
+            int currentMaxSets = m_manSprdMaxLot;
+            if (equityPerSet > 0 && m_maxLeverage > 0)
+            {
+                double currentCash = 100000.0; // TODO: Get from account
+                int leverageMaxSets = static_cast<int>(currentCash * m_maxLeverage / equityPerSet);
+                if (currentMaxSets == 0 || leverageMaxSets < currentMaxSets)
+                {
+                    currentMaxSets = leverageMaxSets;
+                }
+            }
+            if (currentMaxSets <= 0) currentMaxSets = 1;
+            
+            double entryInterval = (boundDistance / 2.0) / currentMaxSets;
+            if (entryInterval < m_minEntryInterval)
+            {
+                entryInterval = m_minEntryInterval;
+            }
+            
+            double entryIntervalLong = entryInterval * m_pSignal->m_dynamicFactorLong;
+            double entryIntervalShort = entryInterval * m_pSignal->m_dynamicFactorShort;
+            double center = (m_arbitrageLower + m_arbitrageUpper) / 2.0;
+            double centerLong = center - m_exitInterval / 2.0;
+            double centerShort = center + m_exitInterval / 2.0;
+            
+            // Store old grids for position adjustment
+            std::vector<double> oldLongGrids = m_pSignal->m_longGrids;
+            std::vector<double> oldShortGrids = m_pSignal->m_shortGrids;
+            
+            // Generate new grids
+            m_pSignal->m_longGrids.clear();
+            m_pSignal->m_shortGrids.clear();
+            
+            for (int k = 1; k <= m_maxGridLevels; k++)
+            {
+                m_pSignal->m_longGrids.push_back(centerLong - k * entryIntervalLong);
+                m_pSignal->m_shortGrids.push_back(centerShort + k * entryIntervalShort);
+            }
+            
+            // Adjust existing open positions to new grid levels
+            // TODO: Implement position adjustment when we add position tracking
+            
+            // Update previous boundary tracking
+            m_pSignal->m_prevArbitrageLower = newArbitrageLower;
+            m_pSignal->m_prevArbitrageUpper = newArbitrageUpper;
+            
+            // Store intervals for reference
+            m_pSignal->m_entryIntervalLong = entryIntervalLong;
+            m_pSignal->m_entryIntervalShort = entryIntervalShort;
+        }
+
         void updtBuySell(double &buy, double &sell)
         {
             // Default values if grid not configured
@@ -2899,8 +3032,53 @@ private:
 
         void notifyExecFinished(int spreadTrdVolume,double spreadTrdPrice,int timeStamp, double spreadExePrice)
         {
+            int prevPos = m_pSignal->m_pos;
+            
             notifyOpenTrade(spreadTrdVolume,spreadTrdPrice, spreadExePrice);
             m_pSignal->m_pos += spreadTrdVolume;
+            
+            // Track opens and closes for dynamic grid adjustment
+            bool isOpening = (prevPos == 0 || (prevPos > 0 && spreadTrdVolume > 0) || (prevPos < 0 && spreadTrdVolume < 0));
+            bool isClosing = (prevPos > 0 && spreadTrdVolume < 0) || (prevPos < 0 && spreadTrdVolume > 0);
+            
+            if (isOpening)
+            {
+                if (spreadTrdVolume > 0)
+                {
+                    m_pSignal->m_numOpensLong++;
+                }
+                else if (spreadTrdVolume < 0)
+                {
+                    m_pSignal->m_numOpensShort++;
+                }
+            }
+            
+            if (isClosing)
+            {
+                // Calculate if this was profitable
+                double pnl = 0.0;
+                if (prevPos > 0 && spreadTrdVolume < 0)
+                {
+                    // Closing long
+                    pnl = (spreadExePrice - m_pSignal->m_atp) * std::abs(spreadTrdVolume);
+                    m_pSignal->m_numClosesLong++;
+                    if (pnl > 0)
+                    {
+                        m_pSignal->m_profitableClosesLong++;
+                    }
+                }
+                else if (prevPos < 0 && spreadTrdVolume > 0)
+                {
+                    // Closing short
+                    pnl = (m_pSignal->m_atp - spreadExePrice) * std::abs(spreadTrdVolume);
+                    m_pSignal->m_numClosesShort++;
+                    if (pnl > 0)
+                    {
+                        m_pSignal->m_profitableClosesShort++;
+                    }
+                }
+            }
+            
             refreshPos();
 
             internalConstrain();
