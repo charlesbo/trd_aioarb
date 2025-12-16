@@ -733,6 +733,17 @@ private:
         const char *calcTimeString(int ts,bool useMillisec=true) { char buffer[16]; return getTimeString(buffer,ts,useMillisec); }
         const char *timeString(bool useMillisec=true) { return calcTimeString(timeStamp(),useMillisec); }
     };
+    // Structure to track individual open positions in the grid
+    struct COpenPosition
+    {
+        double entryPrice;    // Grid level price where position was opened
+        int direction;        // 1 for long, -1 for short
+        double entrySpread;   // Actual spread value when position was opened
+        
+        COpenPosition(double ep, int dir, double es) 
+            : entryPrice(ep), direction(dir), entrySpread(es) {}
+    };
+
     class CSpreadSignal
     {
     public:
@@ -751,6 +762,37 @@ private:
         double m_diPnl = 0.0;
         double m_dnPnl = 0.0;
         double m_pnl = 0.0;
+        
+        // Dynamic grid strategy fields
+        std::vector<COpenPosition> m_openPositions;  // Track all open grid positions
+        double m_dynamicFactorLong = 1.0;            // Dynamic adjustment for long grid
+        double m_dynamicFactorShort = 1.0;           // Dynamic adjustment for short grid
+        int m_numOpensLong = 0;                      // Count of long position opens
+        int m_numOpensShort = 0;                     // Count of short position opens
+        int m_numClosesLong = 0;                     // Count of long position closes
+        int m_numClosesShort = 0;                    // Count of short position closes
+        int m_profitableClosesLong = 0;              // Count of profitable long closes
+        int m_profitableClosesShort = 0;             // Count of profitable short closes
+        double m_entryIntervalLong = 0.0;            // Current entry interval for long side
+        double m_entryIntervalShort = 0.0;           // Current entry interval for short side
+        std::vector<double> m_longGrids;             // Long grid levels
+        std::vector<double> m_shortGrids;            // Short grid levels
+        
+        // Risk management fields
+        int m_arbitragePos = 0;                      // Position from normal arbitrage grid
+        int m_riskPos = 0;                           // Position from risk management
+        bool m_inRiskMode = false;                   // Whether in risk management mode
+        int m_breakDirection = 0;                    // 1: upper break, -1: lower break
+        double m_maxSpread = 0.0;                    // Max spread during risk mode
+        double m_minSpread = 0.0;                    // Min spread during risk mode
+        std::string m_reducedLeg = "";               // Which leg was reduced ("base" or "hedge")
+        double m_reducedAmount = 0.0;                // Amount of position reduced
+        int m_reducedDirection = 0;                  // Direction of reduction
+        double m_maxVirtualAbs = 0.0;                // Max virtual position during risk mode
+        
+        // Boundary tracking
+        double m_prevArbitrageLower = 0.0;
+        double m_prevArbitrageUpper = 0.0;
     };
  
     class CSpreadSignalManager
@@ -1914,6 +1956,25 @@ private:
         double m_refSell;
         int m_bidQ;
         int m_askQ;
+        
+        // Dynamic grid strategy parameters
+        double m_exitInterval = 0.0;                 // Exit interval for taking profit
+        double m_minEntryInterval = 0.0;             // Minimum entry interval between grid levels
+        double m_minDynamic = 1.0;                   // Minimum dynamic factor
+        double m_maxDynamic = 3.0;                   // Maximum dynamic factor
+        double m_widenThreshold = 0.3;               // Profitable rate threshold to widen grid
+        double m_narrowThreshold = 0.7;              // Profitable rate threshold to narrow grid
+        double m_widenStep = 1.2;                    // Step size for widening/narrowing
+        int m_minOps = 10;                           // Minimum operations before adjusting
+        double m_reduceRatio = 0.6;                  // Ratio of position to reduce in risk mode
+        double m_maxLeverage = 20.0;                 // Maximum leverage allowed
+        int m_maxGridLevels = 500;                   // Maximum number of grid levels
+        
+        // Boundary tracking for dynamic updates
+        double m_arbitrageLower = 0.0;
+        double m_arbitrageUpper = 0.0;
+        double m_riskLower = 0.0;
+        double m_riskUpper = 0.0;
 
         double m_gapThreshold;
         int m_triggerVolume;
@@ -2645,7 +2706,85 @@ private:
 
         void updtBuySell(double &buy, double &sell)
         {
-            buy = -DBL_MAX; sell = DBL_MAX;
+            // Default values if grid not configured
+            buy = -DBL_MAX; 
+            sell = DBL_MAX;
+            
+            // Skip if grid parameters not configured
+            if (m_exitInterval <= 0.0 || m_arbitrageLower >= m_arbitrageUpper)
+            {
+                return;
+            }
+            
+            // Calculate base entry interval
+            double boundDistance = m_arbitrageUpper - m_arbitrageLower;
+            double currentCash = 100000.0; // TODO: Get from account or config
+            double equityPerSet = 0.0;
+            
+            for (int i = 0; i < m_pLegs.size(); i++)
+            {
+                equityPerSet += std::abs(m_coefs[i]) * m_pLegs[i]->LP();
+            }
+            
+            int currentMaxSets = m_manSprdMaxLot;
+            if (equityPerSet > 0 && m_maxLeverage > 0)
+            {
+                int leverageMaxSets = static_cast<int>(currentCash * m_maxLeverage / equityPerSet);
+                if (currentMaxSets == 0 || leverageMaxSets < currentMaxSets)
+                {
+                    currentMaxSets = leverageMaxSets;
+                }
+            }
+            if (currentMaxSets <= 0) currentMaxSets = 1;
+            
+            // Calculate entry interval
+            double entryInterval = (boundDistance / 2.0) / currentMaxSets;
+            if (entryInterval < m_minEntryInterval)
+            {
+                entryInterval = m_minEntryInterval;
+            }
+            
+            // Apply dynamic factors
+            double entryIntervalLong = entryInterval * m_pSignal->m_dynamicFactorLong;
+            double entryIntervalShort = entryInterval * m_pSignal->m_dynamicFactorShort;
+            
+            // Calculate centers
+            double center = (m_arbitrageLower + m_arbitrageUpper) / 2.0;
+            double centerLong = center - m_exitInterval / 2.0;
+            double centerShort = center + m_exitInterval / 2.0;
+            
+            // Determine buy/sell based on position
+            int pos = m_pSignal->m_pos;
+            
+            if (pos == 0)
+            {
+                // No position - use center-based pricing
+                buy = centerLong;
+                sell = centerShort;
+            }
+            else if (pos > 0)
+            {
+                // Long position - calculate next level for adding or closing
+                // For closing: current position + exit_interval
+                sell = centerLong + std::abs(pos) * entryIntervalLong / m_stepSize + m_exitInterval;
+                
+                // For adding: next grid level down
+                buy = centerLong - (std::abs(pos) / m_stepSize + 1) * entryIntervalLong;
+            }
+            else // pos < 0
+            {
+                // Short position - calculate next level for adding or closing
+                // For closing: current position - exit_interval
+                buy = centerShort - std::abs(pos) * entryIntervalShort / m_stepSize - m_exitInterval;
+                
+                // For adding: next grid level up
+                sell = centerShort + (std::abs(pos) / m_stepSize + 1) * entryIntervalShort;
+            }
+            
+            // Store calculated intervals for tracking
+            m_pSignal->m_entryIntervalLong = entryIntervalLong;
+            m_pSignal->m_entryIntervalShort = entryIntervalShort;
+            
             return;
         }
 
@@ -3399,6 +3538,42 @@ public:
                 {
                     pSpread->m_stepSize = pSpread->m_pSignal->m_stepSize = stpLot;
                 }
+            }
+            
+            // Load dynamic grid strategy parameters from XML (if provided)
+            // These parameters can be specified globally in the Strategy XML node
+            const CXMLNode *pStrategyDesc = getStrategyDesc();
+            if (pStrategyDesc != nullptr)
+            {
+                pSpread->m_exitInterval = pStrategyDesc->getDoubleProperty("GridExitInterval", 0.0);
+                pSpread->m_minEntryInterval = pStrategyDesc->getDoubleProperty("MinEntryInterval", 0.0);
+                pSpread->m_minDynamic = pStrategyDesc->getDoubleProperty("MinDynamicFactor", 1.0);
+                pSpread->m_maxDynamic = pStrategyDesc->getDoubleProperty("MaxDynamicFactor", 3.0);
+                pSpread->m_widenThreshold = pStrategyDesc->getDoubleProperty("WidenThreshold", 0.3);
+                pSpread->m_narrowThreshold = pStrategyDesc->getDoubleProperty("NarrowThreshold", 0.7);
+                pSpread->m_widenStep = pStrategyDesc->getDoubleProperty("WidenStep", 1.2);
+                pSpread->m_minOps = pStrategyDesc->getIntProperty("MinOpsForAdjust", 10);
+                pSpread->m_reduceRatio = pStrategyDesc->getDoubleProperty("ReduceRatio", 0.6);
+                pSpread->m_maxLeverage = pStrategyDesc->getDoubleProperty("MaxLeverage", 20.0);
+                pSpread->m_maxGridLevels = pStrategyDesc->getIntProperty("MaxGridLevels", 500);
+                
+                // Set initial boundary values (these will be updated dynamically)
+                pSpread->m_arbitrageLower = pStrategyDesc->getDoubleProperty("InitArbitrageLower", 0.0);
+                pSpread->m_arbitrageUpper = pStrategyDesc->getDoubleProperty("InitArbitrageUpper", 0.0);
+                pSpread->m_riskLower = pStrategyDesc->getDoubleProperty("InitRiskLower", 0.0);
+                pSpread->m_riskUpper = pStrategyDesc->getDoubleProperty("InitRiskUpper", 0.0);
+                
+                // Initialize signal's boundary tracking
+                if (pSpread->m_arbitrageLower > 0.0 || pSpread->m_arbitrageUpper > 0.0)
+                {
+                    pSpread->m_pSignal->m_prevArbitrageLower = pSpread->m_arbitrageLower;
+                    pSpread->m_pSignal->m_prevArbitrageUpper = pSpread->m_arbitrageUpper;
+                }
+                
+                g_pMercLog->log("[createSpreadsByManSprds],GridParams,sprd,%s,exitInterval,%g,minEntry,%g,minDyn,%g,maxDyn,%g,widen,%g,narrow,%g,reduceRatio,%g,maxLeverage,%g",
+                    manSprdNm.c_str(), pSpread->m_exitInterval, pSpread->m_minEntryInterval, 
+                    pSpread->m_minDynamic, pSpread->m_maxDynamic, pSpread->m_widenThreshold, 
+                    pSpread->m_narrowThreshold, pSpread->m_reduceRatio, pSpread->m_maxLeverage);
             }
 
             pSpread->finishComb(pSignal);
